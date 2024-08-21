@@ -43,3 +43,5 @@ test/credentials/*.json
 run-tests.sh
 run-coverage.sh
 .vscode
+
+cdk/cdk.out
