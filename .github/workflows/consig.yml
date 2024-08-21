@@ -1,0 +1,15 @@
+name: AWS Service CI/CD
+
+on:
+  push:
+    branches: [dev-consig]
+
+jobs:
+  call-workflow-passing-data:
+    uses: consigai/jambonz-feature-server/.github/workflows/cdk-deploy.yml@dev-consig
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
+    with:
+      stack: jambonzFeatureServer
