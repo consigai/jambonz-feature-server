@@ -3,6 +3,9 @@ const { sippUac } = require('./sipp')('test_fs');
 const bent = require('bent');
 const clearModule = require('clear-module');
 const {provisionCallHook} = require('./utils')
+const {
+  GCP_JSON_KEY,
+} = require('../lib/config');
 const getJSON = bent('json')
 
 const waitFor = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -110,6 +113,10 @@ test('test create-call call-hook basic authentication', async(t) => {
 });
 
 test('test create-call amd', async(t) => {
+  if (!GCP_JSON_KEY) {
+    t.pass('skipping google tests');
+    return t.end();
+  }
   clearModule.all();
   const {srf, disconnect} = require('../app');
 
