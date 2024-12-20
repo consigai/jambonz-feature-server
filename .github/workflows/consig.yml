@@ -2,11 +2,11 @@ name: AWS Service CI/CD
 
 on:
   push:
-    branches: [dev-consig]
+    branches: [consig-cdk]
 
 jobs:
   call-workflow-passing-data:
-    uses: consigai/jambonz-feature-server/.github/workflows/cdk-deploy.yml@dev-consig
+    uses: consigai/jambonz-feature-server/.github/workflows/cdk-deploy.yml@consig-cdk
     permissions:
       actions: write
       contents: read
