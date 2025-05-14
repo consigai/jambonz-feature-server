@@ -28,10 +28,11 @@
     "SipRedirect": "sip:redirect",
     "Say": "say",
     "SayLegacy": "say:legacy",
+    "Stream": "stream",
     "Tag": "tag",
     "Transcribe": "transcribe"
   },
-  "AllowedSipRecVerbs": ["answer", "config", "gather", "transcribe", "listen", "tag"],
+  "AllowedSipRecVerbs": ["answer", "config", "gather", "transcribe", "listen", "tag", "hangup", "sip:decline"],
   "AllowedConfirmSessionVerbs": ["config", "gather", "plays", "say", "tag"],
   "CallStatus": {
     "Trying": "trying",
@@ -136,6 +137,18 @@
     "Connect": "speechmatics_transcribe::connect",
     "Error": "speechmatics_transcribe::error"
   },
+  "OpenAITranscriptionEvents": {
+    "Transcription": "openai_transcribe::transcription",
+    "Translation": "openai_transcribe::translation",
+    "SpeechStarted": "openai_transcribe::speech_started",
+    "SpeechStopped": "openai_transcribe::speech_stopped",
+    "PartialTranscript": "openai_transcribe::partial_transcript",
+    "Info": "openai_transcribe::info",
+    "RecognitionStarted": "openai_transcribe::recognition_started",
+    "ConnectFailure": "openai_transcribe::connect_failed",
+    "Connect": "openai_transcribe::connect",
+    "Error": "openai_transcribe::error"
+  },
   "JambonzTranscriptionEvents": {
     "Transcription": "jambonz_transcribe::transcription",
     "ConnectFailure": "jambonz_transcribe::connect_failed",
@@ -147,6 +160,12 @@
     "Error": "assemblyai_transcribe::error",
     "ConnectFailure": "assemblyai_transcribe::connect_failed",
     "Connect": "assemblyai_transcribe::connect"
+  },
+  "VoxistTranscriptionEvents": {
+    "Transcription": "voxist_transcribe::transcription",
+    "Error": "voxist_transcribe::error",
+    "ConnectFailure": "voxist_transcribe::connect_failed",
+    "Connect": "voxist_transcribe::connect"
   },
   "VadDetection": {
     "Detection": "vad_detect:detection"
@@ -175,12 +194,26 @@
     "Disconnect": "openai_s2s::disconnect",
     "ServerEvent": "openai_s2s::server_event"
   },
+  "LlmEvents_Elevenlabs": {
+    "Error": "error",
+    "Connect": "elevenlabs_s2s::connect",
+    "ConnectFailure": "elevenlabs_s2s::connect_failed",
+    "Disconnect": "elevenlabs_s2s::disconnect",
+    "ServerEvent": "elevenlabs_s2s::server_event"
+  },
   "LlmEvents_VoiceAgent": {
     "Error": "error",
     "Connect": "voice_agent_s2s::connect",
     "ConnectFailure": "voice_agent_s2s::connect_failed",
     "Disconnect": "voice_agent_s2s::disconnect",
     "ServerEvent": "voice_agent_s2s::server_event"
+  },
+  "LlmEvents_Ultravox": {
+    "Error": "error",
+    "Connect": "ultravox_s2s::connect",
+    "ConnectFailure": "ultravox_s2s::connect_failed",
+    "Disconnect": "ultravox_s2s::disconnect",
+    "ServerEvent": "ultravox_s2s::server_event"
   },
   "QueueResults": {
     "Bridged": "bridged",
@@ -196,7 +229,8 @@
   },
   "KillReason": {
     "Hangup": "hangup",
-    "Replaced": "replaced"
+    "Replaced": "replaced",
+    "MediaTimeout": "media_timeout"
   },
   "HookMsgTypes": [
     "session:new",
@@ -210,6 +244,8 @@
     "verb:status",
     "llm:event",
     "llm:tool-call",
+    "tts:tokens-result",
+    "tts:streaming-event",
     "jambonz:error"
   ],
   "RecordState": {
@@ -233,6 +269,43 @@
     "PartialMedia": "partial-media",
     "FullMedia": "full-media"
   },
+  "DeepgramTtsStreamingEvents": {
+    "Empty": "deepgram_tts_streaming::empty",
+    "ConnectFailure": "deepgram_tts_streaming::connect_failed",
+    "Connect": "deepgram_tts_streaming::connect"
+  },
+  "CartesiaTtsStreamingEvents": {
+    "Empty": "cartesia_tts_streaming::empty",
+    "ConnectFailure": "cartesia_tts_streaming::connect_failed",
+    "Connect": "cartesia_tts_streaming::connect"
+  },
+  "ElevenlabsTtsStreamingEvents": {
+    "Empty": "elevenlabs_tts_streaming::empty",
+    "ConnectFailure": "elevenlabs_tts_streaming::connect_failed",
+    "Connect": "elevenlabs_tts_streaming::connect"
+  },
+  "RimelabsTtsStreamingEvents": {
+    "Empty": "rimelabs_tts_streaming::empty",
+    "ConnectFailure": "rimelabs_tts_streaming::connect_failed",
+    "Connect": "rimelabs_tts_streaming::connect"
+  },
+  "CustomTtsStreamingEvents": {
+    "Empty": "custom_tts_streaming::empty",
+    "ConnectFailure": "custom_tts_streaming::connect_failed",
+    "Connect": "custom_tts_streaming::connect"
+  },
+  "TtsStreamingEvents": {
+    "Empty": "tts_streaming::empty",
+    "Pause": "tts_streaming::pause",
+    "Resume": "tts_streaming::resume",
+    "ConnectFailure": "tts_streaming::connect_failed"
+  },
+  "TtsStreamingConnectionStatus": {
+    "NotConnected": "not_connected",
+    "Connected": "connected",
+    "Connecting": "connecting",
+    "Failed": "failed"
+  },
   "MAX_SIMRINGS": 10,
   "BONG_TONE": "tone_stream://v=-7;%(100,0,941.0,1477.0);v=-7;>=2;+=.1;%(1400,0,350,440)",
   "FS_UUID_SET_NAME": "fsUUIDs",
@@ -241,5 +314,9 @@
     "Offline": "OFFLINE",
     "GracefulShutdownInProgress":"SHUTDOWN_IN_PROGRESS"
   },
-  "FEATURE_SERVER" : "feature-server"
+  "FEATURE_SERVER" : "feature-server",
+  "WS_CLOSE_CODES": {
+    "NormalClosure": 1000,
+    "GoingAway": 1001
+  }
 }
