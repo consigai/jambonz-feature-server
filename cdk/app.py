@@ -28,14 +28,14 @@ class EcrRepositoryStack(cdk.Stack):
                             )
         # Get the GitHub commit hash from the environment variable
         github_sha = os.getenv('GITHUB_SHA', 'local')
-        github_branch = os.getenv('GITHUB_REF_NAME', 'local')
+        github_branch = os.getenv('GITHUB_REF_NAME', 'local').replace('.', '_').replace('-', '_')
 
         # Deploy the Docker image to the ECR repository with both the commit hash and branch name as tags
-        ecrdeploy.ECRDeployment(self, "DeployDockerImageSHA",
+        ecrdeploy.ECRDeployment(self, f"DeployDockerImageSHA_{github_sha}",
                       src=ecrdeploy.DockerImageName(jambonzFeatureServer_image_asset.image_uri),
                       dest=ecrdeploy.DockerImageName(f"{repository.repository_uri}:{github_sha}"))
 
-        ecrdeploy.ECRDeployment(self, "DeployDockerImageBranch",
+        ecrdeploy.ECRDeployment(self, f"DeployDockerImageBranch_{github_branch}",
                       src=ecrdeploy.DockerImageName(jambonzFeatureServer_image_asset.image_uri),
                       dest=ecrdeploy.DockerImageName(f"{repository.repository_uri}:{github_branch}"))
 
