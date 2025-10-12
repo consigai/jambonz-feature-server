@@ -1,5 +1,6 @@
 {
   "TaskName": {
+    "Alert": "alert",
     "Answer": "answer",
     "Conference": "conference",
     "Config": "config",
@@ -93,7 +94,14 @@
   "DeepgramTranscriptionEvents": {
     "Transcription": "deepgram_transcribe::transcription",
     "ConnectFailure": "deepgram_transcribe::connect_failed",
-    "Connect": "deepgram_transcribe::connect"
+    "Connect": "deepgram_transcribe::connect",
+    "Error": "deepgram_transcribe::error"
+  },
+  "DeepgramfluxTranscriptionEvents": {
+    "Transcription": "deepgramflux_transcribe::transcription",
+    "ConnectFailure": "deepgramflux_transcribe::connect_failed",
+    "Connect": "deepgramflux_transcribe::connect",
+    "Error": "deepgramflux_transcribe::error"
   },
   "SonioxTranscriptionEvents": {
     "Transcription": "soniox_transcribe::transcription",
@@ -167,8 +175,17 @@
     "ConnectFailure": "voxist_transcribe::connect_failed",
     "Connect": "voxist_transcribe::connect"
   },
+  "CartesiaTranscriptionEvents": {
+    "Transcription": "cartesia_transcribe::transcription",
+    "Error": "cartesia_transcribe::error",
+    "ConnectFailure": "cartesia_transcribe::connect_failed",
+    "Connect": "cartesia_transcribe::connect"
+  },
   "VadDetection": {
     "Detection": "vad_detect:detection"
+  },
+  "SileroVadDetection": {
+    "Detection": "vad_silero:detect"
   },
   "ListenEvents": {
     "Connect": "mod_audio_fork::connect",
@@ -237,6 +254,7 @@
   "KillReason": {
     "Hangup": "hangup",
     "Replaced": "replaced",
+    "ReferComplete": "refer-complete",
     "MediaTimeout": "media_timeout"
   },
   "HookMsgTypes": [
