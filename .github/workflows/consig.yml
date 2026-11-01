@@ -6,7 +6,7 @@ on:
 
 jobs:
   call-workflow-passing-data:
-    uses: consigai/jambonz-feature-server/.github/workflows/cdk-deploy.yml@consig-cdk
+    uses: ./.github/workflows/cdk-deploy.yml
     permissions:
       actions: write
       contents: read
