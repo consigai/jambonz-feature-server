@@ -111,7 +111,7 @@ class FakeEp extends Emitter {
   async forkAudioStop() {}
 }
 
-function makeCs(log, {botMode = true, notifyEvents = true, ws = true} = {}) {
+function makeCs(log, {botMode = true, notifyEvents = true, ws = true, sessionEp = false, ttsStream = false} = {}) {
   const requestor = Object.create(WsRequestor.prototype);
   requestor.request = (type, hook, params) => {
     log.push({type, params});
@@ -127,13 +127,24 @@ function makeCs(log, {botMode = true, notifyEvents = true, ws = true} = {}) {
     kill(onBackgroundGatherBargein) {
       log.push({kill: onBackgroundGatherBargein, current: this.currentTask && this.currentTask.name});
       this.currentTask = null;
-    }
+    },
+    isTtsStreamEnabled: ttsStream,
+    clearTtsStream() { log.push({clearTtsStream: true}); }
   };
+  if (sessionEp) {
+    cs.ep = {
+      connected: true,
+      uuid: 'ep-uuid-1',
+      api(cmd, arg) {
+        log.push({api: cmd, arg});
+        return Promise.resolve();
+      }
+    };
+  }
   return cs;
 }
 
-function makeListen(metadata, cs) {
-  const logger = {error: noop, info: noop, debug: noop};
+function makeListen(metadata, cs, logger = {error: noop, info: noop, debug: noop}) {
   const data = {url: 'ws://127.0.0.1/x'};
   if (metadata) data.metadata = metadata;
   const task = makeTask(logger, {listen: data});
@@ -166,12 +177,14 @@ test('listen wiring: nested speech metadata reaches the task unchanged', (t) => 
   t.end();
 });
 
-test('listen wiring: drive mode, bot mode on: kill then relay in the same tick', (t) => {
+test('listen wiring: drive mode, bot mode on: kill, relay, uuid_break, clear tts stream, in one tick', (t) => {
   const log = [];
-  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log));
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true, ttsStream: true}));
   ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
-  t.equal(log.length, 2, 'kill and relay happened synchronously');
+  t.equal(log.length, 4, 'all four happened synchronously');
   t.deepEqual(log[0], {kill: true, current: 'say'}, 'cs.kill(true) first');
+  t.deepEqual(log[2], {api: 'uuid_break', arg: 'ep-uuid-1'}, 'then uuid_break on the session endpoint');
+  t.deepEqual(log[3], {clearTtsStream: true}, 'then the background tts stream is cleared');
   t.equal(log[1].type, 'verb:status', 'verb:status');
   const p = log[1].params;
   t.equal(p.event, 'speech-event', 'event');
@@ -290,5 +303,93 @@ test('listen wiring: no speech mode, kill and connect failure send nothing', asy
   ep.emit(ListenEvents.ConnectFailure, {reason: 'x'});
   await task.kill(task.cs);
   t.equal(log.length, 0, 'nothing sent');
+  t.end();
+});
+
+const kind = (e) => {
+  if (e.kill !== undefined) return 'kill';
+  return e.type || e.api || 'clear';
+};
+
+test('listen wiring: drive cut audio kill follows the gather: tts stream off, endpoint gone', (t) => {
+  let log = [];
+  let {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
+  t.deepEqual(log.map(kind),
+    ['kill', 'verb:status', 'uuid_break'], 'no tts stream: no clearTtsStream');
+
+  log = [];
+  const cs = makeCs(log, {sessionEp: true, ttsStream: true});
+  cs.ep.connected = false;
+  ({ep} = makeListen({speech: {mode: 'drive'}}, cs));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
+  t.deepEqual(log.map(kind),
+    ['kill', 'verb:status'], 'endpoint not connected: no uuid_break, no clearTtsStream (same gate as the gather)');
+  t.end();
+});
+
+test('listen wiring: no audio kill unless the cut applies', (t) => {
+  for (const [mode, opts, reason] of [
+    ['shadow', {}, 'shadow'],
+    ['drive', {botMode: false}, 'bargein_off'],
+    ['drive', {ws: false}, 'not_websocket']
+  ]) {
+    const log = [];
+    const {ep} = makeListen({speech: {mode}}, makeCs(log, {sessionEp: true, ttsStream: true, ...opts}));
+    ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
+    t.equal(log.length, 1, `${reason}: relay only`);
+    t.equal(log[0].params.cut.reason, reason, reason);
+  }
+  t.end();
+});
+
+test('listen wiring: kill error still kills audio, as the gather path does', (t) => {
+  const log = [];
+  const cs = makeCs(log, {sessionEp: true, ttsStream: true});
+  cs.kill = () => { throw new Error('boom'); };
+  const {ep} = makeListen({speech: {mode: 'drive'}}, cs);
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
+  t.deepEqual(log[0].params.cut, {applied: false, reason: 'kill_error'}, 'kill_error relayed');
+  t.deepEqual(log.slice(1), [{api: 'uuid_break', arg: 'ep-uuid-1'}, {clearTtsStream: true}], 'audio still killed');
+  t.end();
+});
+
+test('listen wiring: uuid_break failure is caught', async(t) => {
+  const log = [];
+  const cs = makeCs(log, {sessionEp: true});
+  cs.ep.api = () => Promise.reject(new Error('no such channel'));
+  const {ep} = makeListen({speech: {mode: 'drive'}}, cs);
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
+  await new Promise((resolve) => setImmediate(resolve));
+  t.equal(log.length, 2, 'kill and relay, rejection swallowed');
+  t.end();
+});
+
+test('listen wiring: a second speech_started with nothing current kills again and reports task null', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {turn: 2})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {turn: 3, seq: 9})));
+  t.equal(log.length, 6, 'each start: kill, relay, uuid_break');
+  t.deepEqual(log[3], {kill: true, current: null}, 'second kill(true) runs with no current task');
+  t.deepEqual(log[4].params.cut, {applied: true, task: null, verb_id: null}, 'cut names no task');
+  t.end();
+});
+
+test('listen wiring: turn_interim is relayed with no cut, no kill, logged at debug only', (t) => {
+  const log = [];
+  const calls = {info: 0, debug: 0};
+  const logger = {error: noop, info: () => calls.info++, debug: () => calls.debug++};
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true, ttsStream: true}), logger);
+  calls.info = 0;
+  calls.debug = 0;
+  for (let i = 0; i < 4; i++) {
+    ep.emit(ListenEvents.JsonMessage, frame(ev('turn_interim', {seq: 10 + i, transcript: 'so far'})));
+  }
+  t.equal(log.length, 4, 'four relays and nothing else');
+  t.ok(log.every((e) => e.type === 'verb:status' && !('cut' in e.params)), 'no cut on turn_interim');
+  t.equal(log[0].params.speech.transcript, 'so far', 'body relayed unchanged');
+  t.equal(calls.info, 0, 'no info logs');
+  t.equal(calls.debug, 4, 'one debug line each');
   t.end();
 });
