@@ -249,6 +249,18 @@ test('listen wiring: connect failure relays stream_closed connect_failed', (t) =
   t.end();
 });
 
+test('listen wiring: nothing is relayed or cut after stream_closed was reported', (t) => {
+  const log = [];
+  const {task, ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log));
+  task.notifyTaskDone = noop;
+  ep.emit(ListenEvents.ConnectFailure, {reason: 'x'});
+  t.equal(log.length, 1, 'stream_closed relayed');
+  ep.emit(ListenEvents.JsonMessage,
+    {type: 'json', data: {v: 1, kind: 'speech', event: 'speech_started', stream_id: 's', seq: 9, epoch: 1, turn: 3}});
+  t.equal(log.length, 1, 'a later speech event is neither relayed nor allowed to kill');
+  t.end();
+});
+
 test('listen wiring: session kill relays stream_closed task_ended once', async(t) => {
   const log = [];
   const {task} = makeListen({speech: {mode: 'shadow'}}, makeCs(log));
