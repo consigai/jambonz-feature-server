@@ -698,18 +698,147 @@ test('listen cleanup: restart, the old listen\'s late cleanup leaves the new lis
   t.end();
 });
 
-test('listen routing (unchanged, documented): a far-end close of one fork reaches every listen', async(t) => {
+/*
+ * Fix 4: fork events a listen cannot attribute. Real tasks run through the real
+ * BackgroundTaskManager on the fsmrf-backed endpoint stub (no FreeSWITCH).
+ */
+const BackgroundTaskManager = require('../lib/utils/background-task-manager');
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+function makeCall(log = []) {
   const ep = realEp();
-  const cs = makeCs([]);
-  const record = startListen(ep, RECORD, cs, 'jambonz-session-record');
-  const speech = startListen(ep, SPEECH('L1'), cs, 'jambonz-background-listen');
-  const stopped = [];
-  ep.forkAudioStop = async(bugname) => { stopped.push(bugname); };
-  record.notifyTaskDone = noop;
-  speech.notifyTaskDone = noop;
+  ep.stopped = [];
+  ep.started = [];
+  ep.set = async() => {};
+  ep.forkAudioStart = async(o) => { ep.started.push(o.bugname); };
+  ep.forkAudioStop = async(bugname) => { ep.stopped.push(bugname); };
+  const cs = makeCs(log);
+  cs.normalizeUrl = (url, method, auth) => ({url, method, ...(auth && {auth})});
+  cs.callInfo = {toJSON: () => ({callSid: 'call-sid-1'})};
+  cs._evaluatePreconditions = async() => ({ep});
+  const span = {end: noop, setAttributes: noop};
+  const mgr = new BackgroundTaskManager({cs, logger: {error: noop, info: noop, debug: noop},
+    rootSpan: {startChildSpan: () => ({span, ctx: {}})}});
+  /* record as _initRecord starts it, without the account and env lookups */
+  mgr._initRecord = () => mgr._initListen({verb: 'listen', ...RECORD}, 'jambonz-session-record', true, 'record');
+  cs.backgroundTaskManager = mgr;
+  return {ep, cs, mgr, log};
+}
+const startSpeech = (mgr, id) => mgr.newTask('listen', {verb: 'listen', ...SPEECH(id)});
+const closed = (log) => log.filter((e) => e.type === 'verb:status' && e.params.speech.event === 'stream_closed')
+  .map((e) => `${e.params.listen_id}:${e.params.speech.reason}`);
+
+test('fork events (1): record + speech, far-end disconnect: record keeps running, speech relays', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  const record = await mgr.newTask('record');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.Connect);
+  ep.fire(ListenEvents.Connect);
   ep.fire(ListenEvents.Disconnect);
-  await new Promise((resolve) => setImmediate(resolve));
-  t.deepEqual(stopped.sort(), ['jambonz-background-listen', 'jambonz-session-record'],
-    'mod_audio_fork::disconnect has no bugname: both listens stop their forks, the recording included');
+  await tick();
+  t.deepEqual(ep.stopped, ['jambonz-background-listen'], 'only the speech fork is stopped');
+  t.deepEqual(closed(log), ['L1:disconnected'], 'speech relays stream_closed disconnected');
+  t.equal(mgr.getTask('record'), record, 'record still tracked');
+  t.notOk(mgr.isTaskRunning('listen'), 'speech listen gone');
+  t.ok(owns(ep, record), 'record keeps its handlers');
+  t.end();
+});
+
+test('fork events (2): record alone, disconnect: record stops as today', async(t) => {
+  const {ep, mgr} = makeCall();
+  await mgr.newTask('record');
+  await tick();
+  ep.fire(ListenEvents.Connect);
+  ep.fire(ListenEvents.Disconnect);
+  await tick();
+  t.deepEqual(ep.stopped, ['jambonz-session-record'], 'record fork stopped');
+  t.notOk(mgr.isTaskRunning('record'), 'record task completed');
+  t.end();
+});
+
+test('fork events: record alone, error and connect_failed: as today', async(t) => {
+  for (const ev of [ListenEvents.Error, ListenEvents.ConnectFailure]) {
+    const {ep, mgr} = makeCall();
+    await mgr.newTask('record');
+    await tick();
+    ep.fire(ListenEvents.Connect);
+    ep.fire(ev, {reason: 'x'});
+    await tick();
+    t.notOk(mgr.isTaskRunning('record'), `${ev}: record task done, as before`);
+  }
+  t.end();
+});
+
+test('fork events (3): record connected, speech connect_failed: record unaffected and tracked', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  const record = await mgr.newTask('record');
+  await tick();
+  ep.fire(ListenEvents.Connect);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'refused'});
+  await tick();
+  t.equal(mgr.getTask('record'), record, 'record still tracked');
+  t.ok(owns(ep, record), 'record keeps its handlers');
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'speech reports its own failure');
+  t.notOk(mgr.isTaskRunning('listen'), 'speech listen done');
+  t.end();
+});
+
+test('fork events: record + speech, analyzer error message: record ignores it, speech acts', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  const record = await mgr.newTask('record');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.Error, {error: 'x'});
+  await tick();
+  t.equal(mgr.getTask('record'), record, 'record still tracked');
+  t.deepEqual(closed(log), ['L1:disconnected'], 'speech relays');
+  t.end();
+});
+
+test('fork events: beep-only listen + record, disconnect: both act as today', async(t) => {
+  const {ep, mgr} = makeCall();
+  await mgr.newTask('record');
+  await mgr.newTask('listen', {verb: 'listen', url: 'wss://a.example/stream', metadata: {beep_source: 'avmd'}});
+  await tick();
+  ep.fire(ListenEvents.Disconnect);
+  await tick();
+  t.deepEqual(ep.stopped, ['jambonz-background-listen'], 'beep listen stops; record ignores it');
+  t.end();
+});
+
+test('fork events (4): speech restart with record active keeps record handlers', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  const record = await mgr.newTask('record');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  t.ok(owns(ep, record), 'before');
+  mgr.stop('listen');
+  await startSpeech(mgr, 'L2');
+  await tick();
+  t.ok(owns(ep, record), 'after');
+  t.equal(mgr.getTask('record'), record, 'record still tracked');
+  t.deepEqual(ep.started, ['jambonz-session-record', 'jambonz-background-listen', 'jambonz-background-listen'],
+    'record once, speech twice');
+  ep.fire(ListenEvents.Disconnect);
+  await tick();
+  t.deepEqual(ep.stopped, ['jambonz-background-listen', 'jambonz-background-listen'],
+    'the stop, then the new listen on the far-end close; never the record');
+  t.ok(closed(log).includes('L2:disconnected'), 'new listen relays its close');
+  t.end();
+});
+
+test('fork events (5): call end stops both', async(t) => {
+  const {ep, mgr} = makeCall();
+  await mgr.newTask('record');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  mgr.stopAll();
+  await tick();
+  t.deepEqual(ep.stopped.sort(), ['jambonz-background-listen', 'jambonz-session-record'], 'both forks stopped');
+  t.equal(mgr.count(), 0, 'nothing tracked');
+  t.equal(ep.listenerCount(ListenEvents.Disconnect), 0, 'no handlers left');
   t.end();
 });
