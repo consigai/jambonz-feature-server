@@ -1217,3 +1217,49 @@ test('listen admission: a late duplicate start from a superseded stream does not
   t.deepEqual(cutOf(log)[2], {applied: false, reason: 'not_admitted'}, 'late a rejected');
   t.end();
 });
+
+/* Review finding 1: ambiguous timings never stop a healthy recording or silence the speech listen */
+test('fork timing: record not yet connected, speech connect_failed: record stays tracked, not stopped', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  const record = await mgr.newTask('record');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await tick();
+  await tick();
+  t.equal(mgr.getTask('record'), record, 'record tracked');
+  t.notOk(ep.calls.includes('stop:jambonz-session-record'), 'record fork never stopped');
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'speech told');
+  t.end();
+});
+
+test('fork timing: speech connected, record connect_failed: both keep running', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  const record = await mgr.newTask('record');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.Connect);
+  ep.fire(ListenEvents.Connect);
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await tick();
+  t.equal(mgr.getTask('record'), record, 'record tracked');
+  t.ok(mgr.isTaskRunning('listen'), 'speech keeps running (it connected)');
+  t.deepEqual(closed(log), [], 'nothing relayed');
+  t.end();
+});
+
+test('fork timing: beep-only listen with record keeps acting on connect_failed (as before)', async(t) => {
+  const {ep, mgr} = makeCall();
+  attachRule(ep);
+  await mgr.newTask('record');
+  await mgr.newTask('listen', {verb: 'listen', url: 'wss://a.example/stream', metadata: {beep_source: 'avmd'}});
+  await tick();
+  ep.fire(ListenEvents.Connect);
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await tick();
+  t.notOk(mgr.isTaskRunning('listen'), 'beep listen done, as before');
+  t.ok(mgr.isTaskRunning('record'), 'record tracked');
+  t.end();
+});
