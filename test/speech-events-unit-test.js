@@ -610,3 +610,106 @@ test('listen admission: shadow mode reports not_admitted the same way', (t) => {
   t.deepEqual(cutOf(log), [{applied: false, reason: 'shadow'}, {applied: false, reason: 'not_admitted'}], 'cuts');
   t.end();
 });
+
+/*
+ * Fix 3: a listen's cleanup removes only its own handlers. Uses drachtio-fsmrf's real
+ * add/removeCustomEventListener and _onCustomEvent, with no FreeSWITCH connection:
+ * mod_audio_fork events carry no bugname, so every listen on the endpoint receives them.
+ */
+const Endpoint = require('drachtio-fsmrf/lib/endpoint');
+
+function realEp() {
+  const ep = Object.create(Endpoint.prototype);
+  Emitter.call(ep);
+  ep._customEvents = [];
+  ep._conn = {subscribe: noop};
+  Object.defineProperty(ep, 'connected', {value: true});
+  ep.forkAudioStop = async() => {};
+  /* what FreeSWITCH sends: Event-Subclass only, body optional */
+  ep.fire = (name, body) => ep._onCustomEvent({
+    getHeader: () => name,
+    getBody: () => (body === undefined ? '' : JSON.stringify(body))
+  });
+  return ep;
+}
+
+function startListen(ep, data, cs, bugname) {
+  const task = makeTask({error: noop, info: noop, debug: noop}, {listen: data});
+  task.bugname = bugname;
+  task.cs = cs;
+  task.ep = ep;
+  task._dtmfHandler = task._onDtmf.bind(task, ep);
+  task._initListeners(ep);
+  return task;
+}
+
+const RECORD = {url: 'wss://rec.example/record/aws_s3', disableBidirectionalAudio: true, mixType: 'stereo',
+  passDtmf: true};
+const SPEECH = (id) => ({url: 'wss://a.example/stream', disableBidirectionalAudio: true,
+  metadata: {speech: {mode: 'drive', listen_id: id}}});
+const FORK_EVENTS = ['Connect', 'ConnectFailure', 'Error', 'KillAudio', 'Disconnect'].map((k) => ListenEvents[k]);
+const owns = (ep, task) => FORK_EVENTS.every((e) =>
+  ep.listeners(e).some((h) => task._epHandlers.some(([ev, mine]) => ev === e && mine === h)));
+
+test('listen cleanup: killing the speech listen leaves the recording fork\'s handlers in place', async(t) => {
+  const ep = realEp();
+  const cs = makeCs([]);
+  const record = startListen(ep, RECORD, cs, 'jambonz-session-record');
+  const speech = startListen(ep, SPEECH('L1'), cs, 'jambonz-background-listen');
+  speech.notifyTaskDone = noop;
+  await speech.kill(cs);
+  t.ok(owns(ep, record), 'record keeps connect, connect_failed, error, kill_audio, disconnect');
+  t.equal(ep.listenerCount('dtmf'), 1, 'record keeps its dtmf handler');
+  t.notOk(owns(ep, speech), 'speech handlers gone');
+  t.equal(ep.listenerCount(ListenEvents.JsonMessage), 0, 'speech json handler gone');
+  t.end();
+});
+
+test('listen cleanup: a failed listen (exec error path) leaves the other fork\'s handlers in place', (t) => {
+  const ep = realEp();
+  const cs = makeCs([]);
+  const record = startListen(ep, RECORD, cs, 'jambonz-session-record');
+  const speech = startListen(ep, SPEECH('L1'), cs, 'jambonz-background-listen');
+  record._removeListeners(ep);
+  t.ok(owns(ep, speech), 'speech keeps its handlers when the recording task cleans up');
+  t.equal(ep.listenerCount(ListenEvents.JsonMessage), 1, 'speech events still delivered');
+  t.end();
+});
+
+test('listen cleanup: restart, the old listen\'s late cleanup leaves the new listen\'s handlers', async(t) => {
+  const ep = realEp();
+  const log = [];
+  const cs = makeCs(log);
+  const record = startListen(ep, RECORD, cs, 'jambonz-session-record');
+  const old = startListen(ep, SPEECH('L1'), cs, 'jambonz-background-listen');
+  old.notifyTaskDone = noop;
+  let release;
+  ep.forkAudioStop = () => new Promise((resolve) => { release = resolve; });
+  const stopping = old.kill(cs);
+  const fresh = startListen(ep, SPEECH('L2'), cs, 'jambonz-background-listen');
+  ep.forkAudioStop = async() => {};
+  release();
+  await stopping;
+  t.ok(owns(ep, fresh), 'new speech listen keeps its handlers');
+  t.ok(owns(ep, record), 'recording keeps its handlers');
+  ep.fire(ListenEvents.JsonMessage, frame(ev('turn_ended', {seq: 1})));
+  const relays = log.filter((e) => e.type === 'verb:status' && e.params.speech.event === 'turn_ended');
+  t.deepEqual(relays.map((e) => e.params.listen_id), ['L2'], 'only the new listen relays');
+  t.end();
+});
+
+test('listen routing (unchanged, documented): a far-end close of one fork reaches every listen', async(t) => {
+  const ep = realEp();
+  const cs = makeCs([]);
+  const record = startListen(ep, RECORD, cs, 'jambonz-session-record');
+  const speech = startListen(ep, SPEECH('L1'), cs, 'jambonz-background-listen');
+  const stopped = [];
+  ep.forkAudioStop = async(bugname) => { stopped.push(bugname); };
+  record.notifyTaskDone = noop;
+  speech.notifyTaskDone = noop;
+  ep.fire(ListenEvents.Disconnect);
+  await new Promise((resolve) => setImmediate(resolve));
+  t.deepEqual(stopped.sort(), ['jambonz-background-listen', 'jambonz-session-record'],
+    'mod_audio_fork::disconnect has no bugname: both listens stop their forks, the recording included');
+  t.end();
+});
