@@ -1,7 +1,7 @@
 const test = require('tape');
 const Emitter = require('events');
 const {
-  getSpeechMode, parseSpeechMessage, decideCut, appliedCut, isSpeechStarted,
+  getSpeechMode, getListenId, parseSpeechMessage, decideCut, appliedCut, isSpeechStarted,
   buildSpeechRelay, streamClosed, speechLogFields
 } = require('../lib/utils/speech-events');
 const {ListenEvents} = require('../lib/utils/constants.json');
@@ -391,5 +391,73 @@ test('listen wiring: turn_interim is relayed with no cut, no kill, logged at deb
   t.equal(log[0].params.speech.transcript, 'so far', 'body relayed unchanged');
   t.equal(calls.info, 0, 'no info logs');
   t.equal(calls.debug, 4, 'one debug line each');
+  t.end();
+});
+
+test('speech-events: listen_id', (t) => {
+  t.equal(getListenId(undefined), undefined, 'no metadata');
+  t.equal(getListenId({speech: {mode: 'drive'}}), undefined, 'absent');
+  t.equal(getListenId({speech: {listen_id: 7}}), undefined, 'not a string');
+  t.equal(getListenId({speech: 'x'}), undefined, 'speech not an object');
+  t.equal(getListenId({speech: {listen_id: 'L-1'}}), 'L-1', 'string');
+  const body = ev('turn_ended');
+  t.equal(buildSpeechRelay(body, undefined, 1, 'L-1').listen_id, 'L-1', 'event relay carries it');
+  t.notOk('listen_id' in buildSpeechRelay(body, undefined, 1, undefined), 'omitted when undefined');
+  t.end();
+});
+
+test('listen wiring: listen_id on every relay, unchanged, all three stream_closed reasons', async(t) => {
+  const id = 'abc "q" \\ 9';
+  const meta = () => ({speech: {mode: 'drive', listen_id: id}});
+
+  let log = [];
+  let {task, ep} = makeListen(meta(), makeCs(log));
+  t.equal(task.listenId, id, 'read once in the constructor, nested string not escaped');
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started')));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('turn_interim', {transcript: 'x'})));
+  const relays = log.filter((e) => e.type === 'verb:status');
+  t.equal(relays.length, 2, 'two relays');
+  t.ok(relays.every((e) => e.params.listen_id === id), 'speech events carry listen_id');
+
+  for (const [reason, fire] of [
+    ['disconnected', (tk, e) => e.emit(ListenEvents.Disconnect, '')],
+    ['connect_failed', (tk, e) => e.emit(ListenEvents.ConnectFailure, {reason: 'x'})],
+    ['task_ended', (tk) => tk.kill(tk.cs)]
+  ]) {
+    log = [];
+    ({task, ep} = makeListen(meta(), makeCs(log)));
+    task.notifyTaskDone = noop;
+    await fire(task, ep);
+    t.equal(log.length, 1, `${reason}: one relay`);
+    t.equal(log[0].params.speech.reason, reason, reason);
+    t.equal(log[0].params.listen_id, id, `${reason}: carries listen_id`);
+  }
+
+  log = [];
+  ({task, ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log)));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('turn_ended')));
+  await task.kill(task.cs);
+  t.equal(log.length, 2, 'event and stream_closed');
+  t.ok(log.every((e) => !('listen_id' in e.params)), 'omitted when the metadata has none');
+  t.end();
+});
+
+test('listen wiring: task_ended is relayed only after forkAudioStop completes and listeners are removed', async(t) => {
+  const log = [];
+  const {task, ep} = makeListen({speech: {mode: 'shadow', listen_id: 'L'}}, makeCs(log));
+  task.notifyTaskDone = noop;
+  const pending = [];
+  ep.forkAudioStop = () => new Promise((resolve) => pending.push(resolve));
+  const done = task.kill(task.cs);
+  ep.emit(ListenEvents.JsonMessage, frame(ev('turn_ended')));
+  ep.emit(ListenEvents.Disconnect, '');
+  await new Promise((resolve) => setImmediate(resolve));
+  t.equal(log.length, 0, 'nothing relayed while the fork is stopping');
+  pending.forEach((resolve) => resolve());
+  await done;
+  await new Promise((resolve) => setImmediate(resolve));
+  t.equal(log.length, 1, 'one relay after the stop');
+  t.equal(log[0].params.speech.reason, 'task_ended', 'task_ended');
+  t.equal(ep.listenerCount(ListenEvents.Disconnect), 0, 'listeners were removed before it was sent');
   t.end();
 });
