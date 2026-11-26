@@ -2,7 +2,7 @@ const test = require('tape');
 const Emitter = require('events');
 const {
   getSpeechMode, getListenId, parseSpeechMessage, decideCut, appliedCut, isSpeechStarted,
-  buildSpeechRelay, streamClosed, speechLogFields
+  buildSpeechRelay, streamClosed, speechLogFields, createAdmission, admitSpeechEvent
 } = require('../lib/utils/speech-events');
 const {ListenEvents} = require('../lib/utils/constants.json');
 const WsRequestor = require('../lib/utils/ws-requestor');
@@ -524,5 +524,89 @@ test('listen-redact: exec error log line has no signed query', async(t) => {
   await task.exec(cs, {ep: new FakeEp()});
   t.ok(lines.some((l) => l.includes('TaskListen:exec - error wss://a.example/stream')), 'error logged');
   t.notOk(lines.some((l) => l.includes('SECRET')), 'no token');
+  t.end();
+});
+
+/* Fix 2: admission before the cut */
+const cutOf = (log) => log.filter((e) => e.type === 'verb:status').map((e) => e.params.cut);
+const kills = (log) => log.filter((e) => e.kill !== undefined).length;
+
+test('speech-events: admitSpeechEvent rules', (t) => {
+  const st = createAdmission();
+  t.ok(admitSpeechEvent(st, ev('source_ready', {seq: 1, turn: undefined})), 'first event');
+  t.notOk(admitSpeechEvent(st, ev('heartbeat', {seq: 1})), 'same seq rejected');
+  t.notOk(admitSpeechEvent(st, ev('heartbeat', {seq: 0})), 'lower seq rejected');
+  t.notOk(admitSpeechEvent(st, ev('heartbeat', {seq: '3'})), 'non-integer seq rejected');
+  t.ok(admitSpeechEvent(st, ev('speech_started', {seq: 3, turn: 0})), 'start turn 0, gap allowed');
+  t.notOk(admitSpeechEvent(st, ev('speech_started', {seq: 4, turn: 0})), 'second start for turn 0');
+  t.ok(admitSpeechEvent(st, ev('turn_ended', {seq: 5, turn: 0})), 'end turn 0');
+  t.notOk(admitSpeechEvent(st, ev('speech_started', {seq: 6, turn: undefined})), 'start without a turn');
+  t.ok(admitSpeechEvent(st, ev('speech_started', {seq: 7, turn: 1})), 'start turn 1');
+  t.deepEqual(st, {streamId: 's1', lastSeq: 7, lastStartedTurn: 1, lastEndedTurn: 0}, 'rejections changed nothing');
+  t.ok(admitSpeechEvent(st, ev('speech_started', {stream_id: 's2', seq: 1, turn: 0})), 'new stream: fresh scope');
+  t.end();
+});
+
+test('listen admission: duplicate speech_started is relayed with not_admitted and no kill', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 1, turn: 0})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 1, turn: 0})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 2, turn: 0})));
+  t.equal(kills(log), 1, 'one kill');
+  t.equal(log.filter((e) => e.api === 'uuid_break').length, 1, 'one audio kill');
+  t.deepEqual(cutOf(log), [
+    {applied: true, task: 'say', verb_id: 'say-1'},
+    {applied: false, reason: 'not_admitted'},
+    {applied: false, reason: 'not_admitted'}
+  ], 'repeats relayed as not_admitted');
+  t.end();
+});
+
+test('listen admission: reordered start after its turn ended is not a cut', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('turn_ended', {seq: 4, turn: 3})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 5, turn: 3})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 6, turn: 2})));
+  t.equal(kills(log), 0, 'no kill');
+  const na = {applied: false, reason: 'not_admitted'};
+  t.deepEqual(cutOf(log), [undefined, na, na], 'both starts relayed, not admitted');
+  t.end();
+});
+
+test('listen admission: a normal sequence is unchanged', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  const seqd = [
+    ['source_ready', {turn: undefined}], ['speech_started', {turn: 0}], ['turn_interim', {turn: 0}],
+    ['turn_end_likely', {turn: 0}], ['turn_resumed', {turn: 0}], ['turn_ended', {turn: 0}],
+    ['heartbeat', {turn: undefined}], ['speech_started', {turn: 1}], ['source_down', {turn: undefined}],
+    ['source_up', {turn: undefined, epoch: 2}], ['speech_started', {turn: 2}], ['turn_ended', {turn: 2}]
+  ];
+  seqd.forEach(([name, extra], i) => ep.emit(ListenEvents.JsonMessage, frame(ev(name, {seq: i + 1, ...extra}))));
+  t.equal(kills(log), 3, 'every start cuts');
+  t.equal(log.filter((e) => e.type === 'verb:status').length, seqd.length, 'every event relayed');
+  t.ok(cutOf(log).filter(Boolean).every((c) => c.applied === true), 'every cut applied');
+  t.end();
+});
+
+test('listen admission: a new stream_id on the same socket starts a fresh scope', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {stream_id: 'a', seq: 9, turn: 5})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {stream_id: 'b', seq: 1, turn: 0})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {stream_id: 'b', seq: 1, turn: 0})));
+  t.equal(kills(log), 2, 'first start of each stream cuts');
+  t.deepEqual(cutOf(log)[2], {applied: false, reason: 'not_admitted'}, 'repeat within b rejected');
+  t.end();
+});
+
+test('listen admission: shadow mode reports not_admitted the same way', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'shadow'}}, makeCs(log));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 1, turn: 0})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 2, turn: 0})));
+  t.deepEqual(cutOf(log), [{applied: false, reason: 'shadow'}, {applied: false, reason: 'not_admitted'}], 'cuts');
   t.end();
 });
