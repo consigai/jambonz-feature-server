@@ -469,46 +469,48 @@ test('listen wiring: task_ended is relayed only after forkAudioStop completes an
 });
 
 /* Fix 1: log and trace views of a listen's url and options */
-const {redactUrl, redactListenOpts} = require('../lib/utils/listen-redact');
+const {urlForLog, listenForLog} = require('../lib/utils/listen-redact');
 
-test('listen-redact: redactUrl drops the query, fragment and credentials', (t) => {
-  t.equal(redactUrl('wss://a.example/stream?cid=c1&exp=1&sig=SECRET'), 'wss://a.example/stream', 'query dropped');
-  t.equal(redactUrl('wss://a.example/s#frag?x'), 'wss://a.example/s', 'fragment dropped');
-  t.equal(redactUrl('wss://user:pw@a.example/s?sig=1'), 'wss://a.example/s', 'userinfo dropped');
-  t.equal(redactUrl('wss://a.example/record/aws_s3'), 'wss://a.example/record/aws_s3', 'plain url unchanged');
-  t.equal(redactUrl('/relative?sig=1'), '/relative', 'relative url');
-  t.equal(redactUrl(undefined), undefined, 'non-string unchanged');
+test('listen-redact: urlForLog keeps scheme, host and first path segment only', (t) => {
+  t.equal(urlForLog('wss://a.example/stream?cid=c1&exp=1&sig=SECRET'), 'wss://a.example/stream', 'query dropped');
+  t.equal(urlForLog('wss://a.example/s#frag?x'), 'wss://a.example/s', 'fragment dropped');
+  t.equal(urlForLog('wss://user:pw@a.example/s?sig=1'), 'wss://a.example/s', 'userinfo dropped');
+  t.equal(urlForLog('wss://a.example/v1/record/aws_s3'), 'wss://a.example/v1/…', 'deeper path not logged');
+  t.equal(urlForLog('wss://a.example/calls/+15551234567/x'), 'wss://a.example/calls/…', 'identifier in path dropped');
+  t.equal(urlForLog('wss://a.example'), 'wss://a.example', 'host only');
+  t.equal(urlForLog('/relative/+15551234567?sig=1'), '/relative/…', 'relative url');
+  t.equal(urlForLog('not a url'), '[url]', 'unrecognised');
+  t.equal(urlForLog(undefined), undefined, 'non-string');
   t.end();
 });
 
-test('listen-redact: redactListenOpts reduces speech, hides secrets, keeps the rest, never mutates', (t) => {
+test('listen-redact: listenForLog is an allowlist and never mutates', (t) => {
   const opts = {
-    url: 'wss://a.example/stream?cid=c1&sig=SECRET',
+    url: 'wss://a.example/stream/+15551234567?cid=c1&sig=SECRET',
     wsAuth: {username: 'u', password: 'PW'},
-    disableBidirectionalAudio: true,
+    mixType: 'stereo', sampleRate: 8000, disableBidirectionalAudio: true, patient_phone: '+15551234567',
     metadata: {
-      call_id: 'c1', beep_source: 'avmd',
-      speech: {mode: 'drive', engine: 'deepgram_flux', listen_id: 'L-1', language: 'en-US', interim: true,
+      call_id: 'c1', patient_phone: '+15551234567', from: '+15550000000',
+      speech: {mode: 'drive', engine: 'deepgram_flux', listen_id: 'L-1_a', language: 'en-US', interim: true,
         engine_options: {eot_threshold: 0.7, keyterms: ['Jane Patient', 'Lisinopril']}}
     }
   };
   const before = JSON.stringify(opts);
-  const out = redactListenOpts(opts);
+  const out = listenForLog(opts, 'jambonz-background-listen');
   t.equal(JSON.stringify(opts), before, 'input not mutated (the wire is unchanged)');
-  t.equal(out.url, 'wss://a.example/stream', 'url without query');
-  t.equal(out.wsAuth, '[redacted]', 'wsAuth hidden');
-  t.equal(out.disableBidirectionalAudio, true, 'other fields kept');
-  t.deepEqual(out.metadata.speech, {mode: 'drive', engine: 'deepgram_flux', listen_id: 'L-1', keyterm_count: 2},
-    'speech reduced to mode, engine, listen_id, keyterm count');
-  t.equal(out.metadata.beep_source, 'avmd', 'other metadata kept');
-  const s = JSON.stringify(out);
-  t.notOk(s.includes('SECRET') || s.includes('Jane') || s.includes('PW'), 'no token, keyterm or password');
-  t.deepEqual(redactListenOpts({url: 'ws://x/y', metadata: {a: 1}}), {url: 'ws://x/y', metadata: {a: 1}},
-    'no speech, no secrets: same content');
-  t.equal(redactListenOpts({metadata: {speech: {mode: 'shadow'}}}).metadata.speech.keyterm_count, 0, 'no keyterms');
-  t.deepEqual(redactListenOpts({url: 'ws://x/y?k=1', method: 'GET', auth: {username: 'u', password: 'p'}}),
-    {url: 'ws://x/y', method: 'GET', auth: '[redacted]'}, 'a ws hook');
-  t.equal(redactListenOpts(undefined), undefined, 'undefined');
+  t.deepEqual(out, {
+    url: 'wss://a.example/stream/…', mixType: 'stereo', sampleRate: 8000, bugname: 'jambonz-background-listen',
+    auth: true, speech: {mode: 'drive', engine: 'deepgram_flux', keyterm_count: 2, listen_id: 'L-1_a'}
+  }, 'only the allowlisted fields');
+  const str = JSON.stringify(out);
+  t.notOk(['SECRET', 'Jane', 'PW', '555'].some((x) => str.includes(x)), 'no token, keyterm, password or number');
+  t.equal(listenForLog({metadata: {speech: {listen_id: 'has space or +1555'}}}).speech.listen_id, '[invalid]',
+    'listen_id outside the pattern is replaced');
+  t.equal(listenForLog({metadata: {speech: {listen_id: 'x'.repeat(65)}}}).speech.listen_id, '[invalid]', 'too long');
+  t.equal(listenForLog({mixType: '+1555'}).mixType, '[invalid]', 'unexpected values replaced');
+  t.notOk('speech' in listenForLog({url: 'ws://x/y', metadata: {a: 1}}), 'no speech, no speech field');
+  t.equal(listenForLog({metadata: {speech: {mode: 'shadow'}}}).speech.keyterm_count, 0, 'no keyterms');
+  t.deepEqual(listenForLog(undefined), {}, 'undefined');
   t.end();
 });
 
