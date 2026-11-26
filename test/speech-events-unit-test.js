@@ -548,7 +548,8 @@ test('speech-events: admitSpeechEvent rules', (t) => {
   t.ok(admitSpeechEvent(st, ev('turn_ended', {seq: 5, turn: 0})), 'end turn 0');
   t.notOk(admitSpeechEvent(st, ev('speech_started', {seq: 6, turn: undefined})), 'start without a turn');
   t.ok(admitSpeechEvent(st, ev('speech_started', {seq: 7, turn: 1})), 'start turn 1');
-  t.deepEqual(st, {streamId: 's1', lastSeq: 7, lastStartedTurn: 1, lastEndedTurn: 0}, 'rejections changed nothing');
+  t.deepEqual(st, {seen: true, streamId: 's1', lastSeq: 7, lastStartedTurn: 1, lastEndedTurn: 0, retired: []},
+    'rejections changed nothing');
   t.ok(admitSpeechEvent(st, ev('speech_started', {stream_id: 's2', seq: 1, turn: 0})), 'new stream: fresh scope');
   t.end();
 });
@@ -608,12 +609,13 @@ test('listen admission: a new stream_id on the same socket starts a fresh scope'
   t.end();
 });
 
-test('listen admission: shadow mode reports not_admitted the same way', (t) => {
+test('listen admission: shadow mode reports shadow for a start it does not admit', (t) => {
   const log = [];
   const {ep} = makeListen({speech: {mode: 'shadow'}}, makeCs(log));
   ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 1, turn: 0})));
   ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {seq: 2, turn: 0})));
-  t.deepEqual(cutOf(log), [{applied: false, reason: 'shadow'}, {applied: false, reason: 'not_admitted'}], 'cuts');
+  t.deepEqual(cutOf(log), [{applied: false, reason: 'shadow'}, {applied: false, reason: 'shadow'}],
+    'shadow never cuts and reports shadow');
   t.end();
 });
 
@@ -1187,5 +1189,29 @@ test('restart: a listen without metadata.speech is not cancelled by a stop durin
   await tick();
   t.ok(a && mgr.getTask('listen') === a, 'started and tracked, as before');
   t.deepEqual(ep.calls, ['start:jambonz-background-listen'], 'never stopped');
+  t.end();
+});
+
+/* Review finding 3: a superseded stream is never admitted again */
+test('speech-events: superseded stream ids are not admitted', (t) => {
+  const st = createAdmission();
+  t.ok(admitSpeechEvent(st, ev('speech_started', {stream_id: 'a', seq: 10, turn: 1})), 'a');
+  t.ok(admitSpeechEvent(st, ev('speech_started', {stream_id: 'b', seq: 1, turn: 0})), 'b supersedes a');
+  t.notOk(admitSpeechEvent(st, ev('speech_started', {stream_id: 'a', seq: 10, turn: 1})), 'late duplicate from a');
+  t.notOk(admitSpeechEvent(st, ev('heartbeat', {stream_id: 'a', seq: 11})), 'anything from a');
+  t.ok(admitSpeechEvent(st, ev('heartbeat', {stream_id: 'b', seq: 2})), 'b state untouched');
+  for (let i = 0; i < 10; i++) admitSpeechEvent(st, ev('heartbeat', {stream_id: `x${i}`, seq: 1}));
+  t.ok(st.retired.length <= 8, 'bounded');
+  t.end();
+});
+
+test('listen admission: a late duplicate start from a superseded stream does not cut', (t) => {
+  const log = [];
+  const {ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log, {sessionEp: true}));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {stream_id: 'a', seq: 10, turn: 1})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {stream_id: 'b', seq: 1, turn: 0})));
+  ep.emit(ListenEvents.JsonMessage, frame(ev('speech_started', {stream_id: 'a', seq: 10, turn: 1})));
+  t.equal(kills(log), 2, 'a and b cut once each');
+  t.deepEqual(cutOf(log)[2], {applied: false, reason: 'not_admitted'}, 'late a rejected');
   t.end();
 });
