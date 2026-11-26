@@ -907,8 +907,9 @@ test('background starts: the old listen completing late does not untrack its rep
   mgr.stop('listen');
   await tick();
   ep.forkAudioStop = async() => {};
-  const fresh = await startSpeech(mgr, 'L2');
+  const starting = startSpeech(mgr, 'L2');
   release();
+  const fresh = await starting;
   await tick();
   await tick();
   t.equal(mgr.getTask('listen'), fresh, 'replacement still tracked');
@@ -1091,5 +1092,100 @@ test('bounded stop: a kill that rejects is handled by the manager', async(t) => 
   await tick();
   process.removeListener('unhandledRejection', onUnhandled);
   t.equal(unhandled, 0, 'no unhandled rejection');
+  t.end();
+});
+
+/* Review finding 2: a stop then restart on the same bugname never stops the replacement */
+const slowPreconditions = (cs, ep) => {
+  cs._evaluatePreconditions = async() => {
+    await tick();
+    return {ep};
+  };
+};
+
+test('restart: stop then immediate start: the new start is issued after the old stop', async(t) => {
+  const {ep, mgr} = makeCall();
+  attachRule(ep);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  mgr.stop('listen');
+  const b = await startSpeech(mgr, 'L2');
+  await tick();
+  t.deepEqual(ep.calls, ['start:jambonz-background-listen', 'stop:jambonz-background-listen',
+    'start:jambonz-background-listen'], 'stop, then start');
+  t.ok(ep.attached.has('jambonz-background-listen') && mgr.getTask('listen') === b, 'replacement attached');
+  t.end();
+});
+
+test('restart: an old stop that never settles delays the start at most the bound, never stops B', async(t) => {
+  const {ep, mgr} = makeCall();
+  attachRule(ep);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  const stop = ep.forkAudioStop;
+  ep.forkAudioStop = (b) => {
+    stop(b);
+    return new Promise(noop);
+  };
+  mgr.stop('listen');
+  ep.forkAudioStop = stop;
+  const began = Date.now();
+  const b = await startSpeech(mgr, 'L2');
+  await tick();
+  t.ok(Date.now() - began < 2000, 'bounded wait');
+  t.ok(ep.attached.has('jambonz-background-listen') && mgr.getTask('listen') === b, 'replacement attached');
+  t.end();
+});
+
+test('restart: once a replacement owns the bugname, the old task never stops it', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  const a = await startSpeech(mgr, 'L1');
+  await tick();
+  /* A ends without a stop reaching FreeSWITCH (stop timed out after the bug was gone) */
+  ep.attached.delete('jambonz-background-listen');
+  mgr.stop('listen');
+  await tick();
+  await tick();
+  const b = await startSpeech(mgr, 'L2');
+  await tick();
+  ep.calls.length = 0;
+  a._failSpeechListen('connect_failed');
+  await a.kill(a.cs);
+  await tick();
+  t.deepEqual(ep.calls, [], 'no stop issued by the old task');
+  t.ok(ep.attached.has('jambonz-background-listen') && mgr.getTask('listen') === b, 'replacement intact');
+  t.notOk(closed(log).includes('L2:connect_failed'), 'nothing reported for B');
+  t.end();
+});
+
+test('restart: stop during a speech start cancels it; the next start runs after it started and stopped', async(t) => {
+  const {ep, cs, mgr} = makeCall();
+  attachRule(ep);
+  slowPreconditions(cs, ep);
+  const first = startSpeech(mgr, 'L1');
+  mgr.stop('listen');
+  const second = startSpeech(mgr, 'L2');
+  const [a, b] = await Promise.all([first, second]);
+  await tick();
+  t.equal(a, undefined, 'cancelled');
+  t.ok(b && mgr.getTask('listen') === b, 'replacement tracked');
+  const i = ep.calls.lastIndexOf('stop:jambonz-background-listen');
+  t.ok(i === -1 || i < ep.calls.lastIndexOf('start:jambonz-background-listen'), 'no stop after the last start');
+  t.ok(ep.attached.has('jambonz-background-listen'), 'replacement attached');
+  t.end();
+});
+
+test('restart: a listen without metadata.speech is not cancelled by a stop during its start (as before)', async(t) => {
+  const {ep, cs, mgr} = makeCall();
+  attachRule(ep);
+  slowPreconditions(cs, ep);
+  const opts = {verb: 'listen', url: 'wss://a.example/stream', metadata: {beep_source: 'avmd'}};
+  const first = mgr.newTask('listen', opts);
+  mgr.stop('listen');
+  const a = await first;
+  await tick();
+  t.ok(a && mgr.getTask('listen') === a, 'started and tracked, as before');
+  t.deepEqual(ep.calls, ['start:jambonz-background-listen'], 'never stopped');
   t.end();
 });
