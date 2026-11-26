@@ -433,6 +433,7 @@ test('listen wiring: listen_id on every relay, unchanged, all three stream_close
     ({task, ep} = makeListen(meta(), makeCs(log)));
     task.notifyTaskDone = noop;
     await fire(task, ep);
+    await new Promise((resolve) => setImmediate(resolve));
     t.equal(log.length, 1, `${reason}: one relay`);
     t.equal(log[0].params.speech.reason, reason, reason);
     t.equal(log[0].params.listen_id, id, `${reason}: carries listen_id`);
@@ -904,6 +905,7 @@ test('background starts: the old listen completing late does not untrack its rep
   let release;
   ep.forkAudioStop = () => new Promise((resolve) => { release = resolve; });
   mgr.stop('listen');
+  await tick();
   ep.forkAudioStop = async() => {};
   const fresh = await startSpeech(mgr, 'L2');
   release();
@@ -1044,5 +1046,50 @@ test('fork failure: speech connect_failed with record active never stops the rec
   t.ok(ep.attached.has('jambonz-session-record'), 'record bug attached');
   t.notOk(ep.calls.includes('stop:jambonz-session-record'), 'record never stopped');
   t.equal(mgr.getTask('record'), record, 'record tracked');
+  t.end();
+});
+
+/* Review finding 4: stops are bounded; completion and cleanup never wait on a stuck stop */
+test('bounded stop: a stop that never settles still completes kill within the bound', async(t) => {
+  const log = [];
+  const {task, ep} = makeListen({speech: {mode: 'drive', listen_id: 'L'}}, makeCs(log));
+  let done = false;
+  task.notifyTaskDone = () => { done = true; };
+  ep.forkAudioStop = () => new Promise(noop);
+  const began = Date.now();
+  await task.kill(task.cs);
+  const took = Date.now() - began;
+  t.ok(took >= 900 && took < 2000, `kill returned after the bound (${took} ms)`);
+  t.ok(done, 'task completed');
+  t.equal(ep.listenerCount(ListenEvents.Disconnect), 0, 'handlers removed');
+  t.equal(log[0].params.speech.reason, 'task_ended', 'task_ended relayed');
+  t.end();
+});
+
+test('bounded stop: connect_failed with a stuck stop still relays and completes', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.forkAudioStop = () => new Promise(noop);
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'relayed after the bound');
+  t.notOk(mgr.isTaskRunning('listen'), 'completed and untracked');
+  t.equal(ep.listenerCount(ListenEvents.Disconnect), 0, 'handlers removed');
+  t.end();
+});
+
+test('bounded stop: a kill that rejects is handled by the manager', async(t) => {
+  const {mgr} = makeCall();
+  const task = await startSpeech(mgr, 'L1');
+  task.kill = () => Promise.reject(new Error('boom'));
+  let unhandled = 0;
+  const onUnhandled = () => unhandled++;
+  process.on('unhandledRejection', onUnhandled);
+  mgr.stop('listen');
+  await tick();
+  await tick();
+  process.removeListener('unhandledRejection', onUnhandled);
+  t.equal(unhandled, 0, 'no unhandled rejection');
   t.end();
 });
