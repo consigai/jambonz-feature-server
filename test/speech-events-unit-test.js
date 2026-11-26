@@ -842,3 +842,68 @@ test('fork events (5): call end stops both', async(t) => {
   t.equal(ep.listenerCount(ListenEvents.Disconnect), 0, 'no handlers left');
   t.end();
 });
+
+/* Fix 5: concurrent starts of one background task type collapse to one */
+test('background starts: concurrent record starts (account + forced) make one task, one fork', async(t) => {
+  const {ep, mgr} = makeCall();
+  const [a, b] = await Promise.all([mgr.newTask('record'), mgr.newTask('record', {force: true})]);
+  await tick();
+  t.ok(a && a === b, 'both callers get the one task');
+  t.equal(mgr.getTask('record'), a, 'tracked');
+  t.deepEqual(ep.started, ['jambonz-session-record'], 'one fork start, no duplicate bug');
+  t.equal(mgr.starting.size, 0, 'nothing left starting');
+  t.end();
+});
+
+test('background starts: a failed duplicate cannot untrack the live task', async(t) => {
+  const {mgr} = makeCall();
+  const live = await mgr.newTask('record');
+  const dup = {removeAllListeners: noop, span: {end: noop}};
+  mgr._taskCompleted('record', dup);
+  mgr._taskError('record', dup, new Error('-ERR Operation Failed'));
+  t.equal(mgr.getTask('record'), live, 'live task still tracked');
+  t.end();
+});
+
+test('background starts: a start that yields nothing lets the waiting (forced) start run', async(t) => {
+  const {ep, mgr} = makeCall();
+  const real = mgr._initRecord;
+  mgr._initRecord = async(force) => {
+    await tick();
+    return force ? real() : undefined;
+  };
+  const [a, b] = await Promise.all([mgr.newTask('record'), mgr.newTask('record', {force: true})]);
+  await tick();
+  t.equal(a, undefined, 'unforced start without the account flag: nothing');
+  t.ok(b && mgr.getTask('record') === b, 'forced start ran and is tracked');
+  t.deepEqual(ep.started, ['jambonz-session-record'], 'one fork');
+  t.end();
+});
+
+test('background starts: stop during a start cancels it; the next start is a genuine replacement', async(t) => {
+  const {ep, mgr} = makeCall();
+  const first = startSpeech(mgr, 'L1');
+  mgr.stop('listen');
+  const second = startSpeech(mgr, 'L2');
+  const [a, b] = await Promise.all([first, second]);
+  await tick();
+  t.equal(a, undefined, 'cancelled start returns nothing');
+  t.ok(b && mgr.getTask('listen') === b && b.listenId === 'L2', 'the replacement is tracked');
+  t.ok(ep.stopped.includes('jambonz-background-listen'), 'the cancelled listen was stopped');
+  t.end();
+});
+
+test('background starts: the old listen completing late does not untrack its replacement', async(t) => {
+  const {ep, mgr} = makeCall();
+  await startSpeech(mgr, 'L1');
+  let release;
+  ep.forkAudioStop = () => new Promise((resolve) => { release = resolve; });
+  mgr.stop('listen');
+  ep.forkAudioStop = async() => {};
+  const fresh = await startSpeech(mgr, 'L2');
+  release();
+  await tick();
+  await tick();
+  t.equal(mgr.getTask('listen'), fresh, 'replacement still tracked');
+  t.end();
+});
