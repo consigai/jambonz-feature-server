@@ -252,24 +252,29 @@ test('listen wiring: disconnect without speech mode sends nothing', (t) => {
   t.end();
 });
 
-test('listen wiring: connect failure relays stream_closed connect_failed', (t) => {
+test('listen wiring: connect failure relays stream_closed connect_failed', async(t) => {
   const log = [];
   const {task, ep} = makeListen({speech: {mode: 'shadow'}}, makeCs(log));
   task.notifyTaskDone = noop;
   ep.emit(ListenEvents.ConnectFailure, {reason: 'x'});
+  await new Promise((resolve) => setImmediate(resolve));
   t.equal(log.length, 1, 'one relay');
   t.equal(log[0].params.speech.reason, 'connect_failed', 'connect_failed');
   t.end();
 });
 
-test('listen wiring: nothing is relayed or cut after stream_closed was reported', (t) => {
+test('listen wiring: nothing is relayed or cut after stream_closed was reported', async(t) => {
   const log = [];
   const {task, ep} = makeListen({speech: {mode: 'drive'}}, makeCs(log));
   task.notifyTaskDone = noop;
+  const start = {type: 'json', data: {v: 1, kind: 'speech', event: 'speech_started', stream_id: 's', seq: 9,
+    epoch: 1, turn: 3}};
   ep.emit(ListenEvents.ConnectFailure, {reason: 'x'});
+  ep.emit(ListenEvents.JsonMessage, start);
+  t.equal(log.length, 0, 'nothing relayed or cut while the fork is stopping');
+  await new Promise((resolve) => setImmediate(resolve));
   t.equal(log.length, 1, 'stream_closed relayed');
-  ep.emit(ListenEvents.JsonMessage,
-    {type: 'json', data: {v: 1, kind: 'speech', event: 'speech_started', stream_id: 's', seq: 9, epoch: 1, turn: 3}});
+  ep.emit(ListenEvents.JsonMessage, {...start, data: {...start.data, seq: 10, turn: 4}});
   t.equal(log.length, 1, 'a later speech event is neither relayed nor allowed to kill');
   t.end();
 });
@@ -905,5 +910,139 @@ test('background starts: the old listen completing late does not untrack its rep
   await tick();
   await tick();
   t.equal(mgr.getTask('listen'), fresh, 'replacement still tracked');
+  t.end();
+});
+
+/* Fix 6: a speech listen that fails stops its own fork so the next start can attach */
+function attachRule(ep) {
+  /* mod_audio_fork: one bug per bugname per channel */
+  ep.attached = new Set();
+  ep.calls = [];
+  ep.forkAudioStart = async(o) => {
+    ep.calls.push(`start:${o.bugname}`);
+    if (ep.attached.has(o.bugname)) throw new Error('-ERR Operation Failed');
+    ep.attached.add(o.bugname);
+  };
+  ep.forkAudioStop = async(bugname) => {
+    ep.calls.push(`stop:${bugname}`);
+    if (!ep.attached.delete(bugname)) throw new Error('-ERR no bug');
+  };
+}
+
+test('fork failure: speech connect_failed stops its fork; the next start attaches', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  const first = await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'HS: ws upgrade response not 101'});
+  await tick();
+  await tick();
+  t.notOk(mgr.isTaskRunning('listen'), 'first listen done');
+  t.notOk(ep.attached.has('jambonz-background-listen'), 'its bug was removed');
+  const second = await startSpeech(mgr, 'L2');
+  await tick();
+  t.ok(second && second !== first && mgr.getTask('listen') === second, 'second listen tracked');
+  t.ok(ep.attached.has('jambonz-background-listen'), 'second start attached');
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'only the first failure reported');
+  t.end();
+});
+
+test('fork failure: stream_closed is relayed after the stop completes', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  let release;
+  const stop = ep.forkAudioStop;
+  ep.forkAudioStop = (b) => new Promise((resolve) => { release = () => resolve(stop(b)); });
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await tick();
+  t.deepEqual(closed(log), [], 'nothing relayed while stopping');
+  t.ok(mgr.isTaskRunning('listen'), 'not completed while stopping');
+  release();
+  await tick();
+  await tick();
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'relayed after the stop');
+  t.notOk(mgr.isTaskRunning('listen'), 'then completed');
+  t.end();
+});
+
+test('fork failure: speech error stops its fork before stream_closed', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.Error, {error: 'x'});
+  await tick();
+  await tick();
+  t.notOk(ep.attached.has('jambonz-background-listen'), 'bug removed');
+  t.deepEqual(closed(log), ['L1:disconnected'], 'relayed');
+  t.end();
+});
+
+test('fork failure: exec failure (already attached) stops the leftover bug; the retry attaches', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  ep.attached.add('jambonz-background-listen');
+  await startSpeech(mgr, 'L1');
+  await tick();
+  await tick();
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'start failure reported');
+  t.notOk(ep.attached.has('jambonz-background-listen'), 'leftover bug removed');
+  await startSpeech(mgr, 'L2');
+  await tick();
+  t.ok(ep.attached.has('jambonz-background-listen') && mgr.isTaskRunning('listen'), 'retry attached');
+  t.end();
+});
+
+test('fork failure: stop error on a bug that never attached is swallowed', async(t) => {
+  const {ep, mgr, log} = makeCall();
+  attachRule(ep);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.attached.clear();
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await tick();
+  await tick();
+  t.deepEqual(closed(log), ['L1:connect_failed'], 'still relayed');
+  t.notOk(mgr.isTaskRunning('listen'), 'completed');
+  t.end();
+});
+
+test('fork failure: record listen and non-speech listen do not stop their fork (unchanged)', async(t) => {
+  for (const [type, opts, bug] of [
+    ['record', undefined, 'jambonz-session-record'],
+    ['listen', {verb: 'listen', url: 'wss://a.example/stream', metadata: {beep_source: 'avmd'}},
+      'jambonz-background-listen']
+  ]) {
+    for (const ev of [ListenEvents.ConnectFailure, ListenEvents.Error]) {
+      const {ep, mgr} = makeCall();
+      attachRule(ep);
+      await mgr.newTask(type, opts);
+      await tick();
+      ep.fire(ev, {reason: 'x'});
+      await tick();
+      await tick();
+      t.notOk(mgr.isTaskRunning(type), `${bug} ${ev}: task done as before`);
+      t.ok(ep.attached.has(bug), `${bug} ${ev}: fork not stopped, as before`);
+    }
+  }
+  t.end();
+});
+
+test('fork failure: speech connect_failed with record active never stops the record fork', async(t) => {
+  const {ep, mgr} = makeCall();
+  attachRule(ep);
+  const record = await mgr.newTask('record');
+  await tick();
+  ep.fire(ListenEvents.Connect);
+  await startSpeech(mgr, 'L1');
+  await tick();
+  ep.fire(ListenEvents.ConnectFailure, {reason: 'x'});
+  await tick();
+  await tick();
+  t.ok(ep.attached.has('jambonz-session-record'), 'record bug attached');
+  t.notOk(ep.calls.includes('stop:jambonz-session-record'), 'record never stopped');
+  t.equal(mgr.getTask('record'), record, 'record tracked');
   t.end();
 });
