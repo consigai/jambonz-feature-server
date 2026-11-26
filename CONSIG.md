@@ -8,8 +8,8 @@ its ledger id, so `grep -rn "CONSIG:" lib` finds all of them and `grep -rn "<ID>
 Build, release and upstream-update steps are in `docs/CONSIG-BUILD-AND-RELEASE.md`.
 
 Code state described here: branch `feat/listen-speech-events` (image `consig-0.9.5-8n`), 2026-11-26.
-Wire contract for the speech entries: `xela-e2e/refactor/reviews/speech-events-contract-v1.md` (sections 1 to 14).
-Review that explains several guards: `xela-e2e/refactor/reviews/codex-feature-server-review-2026-11-26.md`.
+Wire contract for the speech entries: `docs/architecture/speech-events-contract-v1.md` in `consigai/outbound` (sections 1 to 14).
+Several guards came out of an outside review on 2026-11-26; each one's reason is stated in its ledger entry and in the code comment.
 Pull request with the speech work: consigai/jambonz-feature-server#3.
 
 ## The ledger
