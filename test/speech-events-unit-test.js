@@ -865,6 +865,21 @@ test('background starts: concurrent record starts (account + forced) make one ta
   t.end();
 });
 
+test('background starts: other types are not collapsed; both run and keep their own options', async(t) => {
+  const {mgr} = makeCall();
+  const seen = [];
+  mgr._initBargeIn = async(opts) => {
+    seen.push(opts.id);
+    await tick();
+    return {name: 'bargeIn', opts, span: {end: noop}};
+  };
+  const [a, b] = await Promise.all([mgr.newTask('bargeIn', {id: 'one'}), mgr.newTask('bargeIn', {id: 'two'})]);
+  t.deepEqual(seen, ['one', 'two'], 'both starts ran');
+  t.notEqual(a, b, 'the second caller does not get the first task');
+  t.equal(b.opts.id, 'two', 'the second keeps its own options');
+  t.end();
+});
+
 test('background starts: a failed duplicate cannot untrack the live task', async(t) => {
   const {mgr} = makeCall();
   const live = await mgr.newTask('record');
